@@ -24,6 +24,8 @@ interface NavbarProps {
   cartCount: number;
   onOpenCart: () => void;
   session: UserSession;
+  authEmail?: string | null;
+  authPhotoUrl?: string | null;
   onOpenProfile: () => void;
   onToggleSteamLogin: () => void;
   onConnectWallet: () => void;
@@ -58,6 +60,8 @@ export function Navbar({
   cartCount,
   onOpenCart,
   session,
+  authEmail,
+  authPhotoUrl,
   onOpenProfile,
   onToggleSteamLogin,
   onConnectWallet,
@@ -109,10 +113,19 @@ export function Navbar({
                 type="button"
                 onClick={onOpenProfile}
                 className="flex items-center gap-2 rounded-lg border border-slate-700/80 bg-[#1e2636] px-2.5 py-1.5 text-xs font-medium text-slate-200 transition hover:border-slate-500 hover:bg-[#253044]"
-                title="Perfil Steam OpenID y Trade URL"
+                title={authEmail ? `Sesión: ${authEmail}` : 'Perfil de Cuenta y Trade URL'}
               >
-                <SteamIcon className="h-3.5 w-3.5 text-sky-400" />
-                <span className="hidden max-w-[110px] truncate sm:inline">{session.steamName}</span>
+                {authPhotoUrl ? (
+                  <img
+                    src={authPhotoUrl}
+                    alt={session.steamName}
+                    referrerPolicy="no-referrer"
+                    className="h-5 w-5 rounded-full border border-emerald-400/60 object-cover"
+                  />
+                ) : (
+                  <SteamIcon className="h-3.5 w-3.5 text-sky-400" />
+                )}
+                <span className="hidden max-w-[125px] truncate sm:inline">{session.steamName}</span>
                 <span
                   className={`h-2 w-2 rounded-full ${
                     session.steamGuardMobile ? 'bg-emerald-400' : 'bg-amber-400'

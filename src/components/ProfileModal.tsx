@@ -12,6 +12,8 @@ interface ProfileModalProps {
   open: boolean;
   onClose: () => void;
   session: UserSession;
+  authEmail?: string | null;
+  authPhotoUrl?: string | null;
   onUpdateSession: (patch: Partial<UserSession>) => void;
   onConnectRealWallet: (provider: 'Phantom' | 'Solflare' | 'Demo') => void;
   onLogout: () => void;
@@ -21,6 +23,8 @@ export function ProfileModal({
   open,
   onClose,
   session,
+  authEmail,
+  authPhotoUrl,
   onUpdateSession,
   onConnectRealWallet,
   onLogout,
@@ -37,11 +41,22 @@ export function ProfileModal({
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between border-b border-slate-800 pb-3.5">
-          <div>
-            <span className="font-mono text-[10px] font-bold uppercase tracking-widest text-sky-400">
-              STEAM OPENID 2.0 · WALLET SOLANA · TRADE URL P2P
-            </span>
-            <h2 className="font-cs text-xl tracking-wider text-white">{session.steamName}</h2>
+          <div className="flex items-center gap-3">
+            {authPhotoUrl && (
+              <img
+                src={authPhotoUrl}
+                alt={session.steamName}
+                referrerPolicy="no-referrer"
+                className="h-11 w-11 rounded-full border-2 border-emerald-400/60 object-cover"
+              />
+            )}
+            <div>
+              <span className="font-mono text-[10px] font-bold uppercase tracking-widest text-sky-400">
+                CUENTA VERIFICADA · WALLET SOLANA · TRADE URL P2P
+              </span>
+              <h2 className="font-cs text-xl tracking-wider text-white">{session.steamName}</h2>
+              {authEmail && <p className="font-mono text-[11px] text-slate-400">{authEmail}</p>}
+            </div>
           </div>
           <button
             type="button"
@@ -168,7 +183,7 @@ export function ProfileModal({
               className="inline-flex items-center gap-1.5 rounded-lg border border-rose-500/35 bg-rose-500/10 px-3 py-2 text-xs font-semibold text-rose-300 hover:bg-rose-500/20"
             >
               <LogOut className="h-3.5 w-3.5" />
-              Cerrar Sesión Steam
+              Cerrar Sesión
             </button>
             <button
               type="button"

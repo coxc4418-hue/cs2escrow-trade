@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react';
-import { CheckCircle2 } from 'lucide-react';
+import { CheckCircle2, Loader2 } from 'lucide-react';
+import { onAuthStateChanged, signOut, type User as FirebaseUser } from 'firebase/auth';
+import { auth } from './firebase';
 import {
   buildInitialOrders,
   computeSplit,
@@ -13,6 +15,7 @@ import {
   type ReferralRecord,
   type UserSession,
 } from './data/market';
+import { AuthGate } from './components/AuthGate';
 import { Navbar, type AppView } from './components/Navbar';
 import { MarketView } from './components/MarketView';
 import { SkinModal } from './components/SkinModal';
@@ -51,6 +54,10 @@ function randomHash(len = 48) {
 }
 
 export default function App() {
+  const [authUser, setAuthUser] = useState<FirebaseUser | null>(null);
+  const [authReady, setAuthReady] = useState(false);
+  const [urlRefCode, setUrlRefCode] = useState<string | null>(null);
+
   const [activeView, setActiveView] = useState<AppView>('market');
   const [activeCategory, setActiveCategory] = useState<MarketCategory>('featured');
   const [searchQuery, setSearchQuery] = useState('');
@@ -109,18 +116,38 @@ export default function App() {
     return () => clearTimeout(t);
   }, [toast]);
 
+  // Listen to Firebase Auth state (blocks app until authenticated)
+  useEffect(() => {
+    const unsub = onAuthStateChanged(auth, (fbUser) => {
+      setAuthUser(fbUser);
+      setAuthReady(true);
+      if (fbUser) {
+        const name =
+          fbUser.displayName?.trim() ||
+          fbUser.email?.split('@')[0] ||
+          DEFAULT_SESSION.steamName;
+        setSession((prev) => ({
+          ...prev,
+          loggedIn: true,
+          steamName: name,
+        }));
+      }
+    });
+    return () => unsub();
+  }, []);
+
   // Capture ?ref=CODIGO_AFILIADO for lifetime attribution (with anti self-referral check)
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const refParam = params.get('ref')?.trim().toUpperCase();
     if (refParam && refParam.length >= 3) {
+      setUrlRefCode(refParam);
       setSession((prev) => {
         if (refParam === prev.referralCode.toUpperCase()) {
           notify('Bloqueo anti-auto-referido: no puedes vincularte con tu propio código.');
           return prev;
         }
         if (prev.referredByCode !== refParam) {
-          notify(`Código de referido vitalicio detectado: ${refParam} (50% comisión).`);
           return { ...prev, referredByCode: refParam };
         }
         return prev;
@@ -152,7 +179,6 @@ export default function App() {
         if (alive) setLoadingCatalog(false);
       });
 
-    // Optional live SOL/USD price from public CoinGecko endpoint (fallback 185)
     fetch('https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd')
       .then((r) => r.json())
       .then((d) => {
@@ -203,6 +229,22 @@ export default function App() {
     }
   }, [referrals]);
 
+  // Splash while checking Firebase session
+  if (!authReady) {
+    return (
+      <div className="flex min-h-screen flex-col items-center justify-center bg-[#0c1018] text-slate-200">
+        <Loader2 className="h-9 w-9 animate-spin text-emerald-400" />
+        <p className="mt-3 font-cs text-lg tracking-widest text-white">CS2 MARKET</p>
+        <p className="mt-1 font-mono text-[11px] text-slate-400">Verificando sesión segura...</p>
+      </div>
+    );
+  }
+
+  // Gate: require real Firebase Login / Register (Google or Email/Password) before accessing system
+  if (!authUser) {
+    return <AuthGate referralCodeFromUrl={urlRefCode} />;
+  }
+
   const handleChangeView = (view: AppView) => {
     setActiveView(view);
     window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -210,6 +252,15 @@ export default function App() {
 
   const handleUpdateSession = (patch: Partial<UserSession>) => {
     setSession((prev) => ({ ...prev, ...patch }));
+  };
+
+  const handleLogout = async () => {
+    try {
+      await signOut(auth);
+      setProfileOpen(false);
+    } catch {
+      notify('No se pudo cerrar sesión.');
+    }
   };
 
   const handleConnectRealWallet = async (provider: 'Phantom' | 'Solflare' | 'Demo') => {
@@ -270,10 +321,6 @@ export default function App() {
   };
 
   const createEscrowOrders = (itemsToBuy: MarketItem[], currency: PayCurrency) => {
-    if (!session.loggedIn) {
-      notify('Inicia sesión con Steam primero para crear un Escrow.');
-      return;
-    }
     const created: EscrowOrder[] = itemsToBuy.map((item, idx) => {
       const hasRef = Boolean(session.referredByCode);
       const split = computeSplit(item.priceUsdc, hasRef);
@@ -504,11 +551,10 @@ export default function App() {
         cartCount={cart.length}
         onOpenCart={() => setCartOpen(true)}
         session={session}
+        authEmail={authUser.email}
+        authPhotoUrl={authUser.photoURL}
         onOpenProfile={() => setProfileOpen(true)}
-        onToggleSteamLogin={() => {
-          handleUpdateSession({ loggedIn: true });
-          notify('Sesión Steam OpenID 2.0 iniciada (Modo Demo).');
-        }}
+        onToggleSteamLogin={() => setProfileOpen(true)}
         onConnectWallet={() => setProfileOpen(true)}
         activeEscrowCount={activeEscrowCount}
         openDisputeCount={openDisputeCount}
@@ -589,12 +635,11 @@ export default function App() {
         open={profileOpen}
         onClose={() => setProfileOpen(false)}
         session={session}
+        authEmail={authUser.email}
+        authPhotoUrl={authUser.photoURL}
         onUpdateSession={handleUpdateSession}
         onConnectRealWallet={handleConnectRealWallet}
-        onLogout={() => {
-          handleUpdateSession({ loggedIn: false });
-          notify('Sesión Steam cerrada.');
-        }}
+        onLogout={handleLogout}
       />
 
       {toast && (
