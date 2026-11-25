@@ -1,0 +1,91 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@font-face {
+  font-family: 'CounterStrike';
+  src: url('/fonts/cs_regular.ttf') format('truetype');
+  font-weight: normal;
+  font-style: normal;
+  font-display: swap;
+}
+
+@layer base {
+  html {
+    background-color: #121721;
+    color: #e5ecf6;
+  }
+  body {
+    overflow-x: hidden;
+    background-color: #121721;
+    background-image:
+      radial-gradient(circle at 18% -10%, rgba(56, 189, 248, 0.06), transparent 42%),
+      radial-gradient(circle at 82% -8%, rgba(16, 185, 129, 0.05), transparent 40%);
+  }
+}
+
+::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+}
+::-webkit-scrollbar-track {
+  background: #121721;
+}
+::-webkit-scrollbar-thumb {
+  background: #2b364a;
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #475569;
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* Minimalist Card matching client mockups + subtle CS rarity tactical hover */
+.skin-card {
+  background: #181e29;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  transition: transform 0.22s ease, border-color 0.22s ease, box-shadow 0.22s ease;
+}
+.skin-card:hover {
+  transform: translateY(-3px);
+  border-color: rgba(148, 163, 184, 0.36);
+  box-shadow: 0 16px 36px -14px rgba(0, 0, 0, 0.72);
+}
+.skin-card:hover .skin-img {
+  transform: scale(1.07) rotate(-1.5deg);
+}
+.skin-img {
+  transition: transform 0.28s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* Escrow 7-day floating popover card (matching Mockup 2) */
+.escrow-popover {
+  background: linear-gradient(155deg, #1b2434 0%, #111827 100%);
+  border: 1px solid rgba(99, 132, 255, 0.32);
+  box-shadow:
+    0 20px 50px -10px rgba(0, 0, 0, 0.85),
+    0 0 0 1px rgba(255, 255, 255, 0.04) inset;
+}
+
+.float-bar-bg {
+  background: linear-gradient(
+    90deg,
+    #22c55e 0%,
+    #22c55e 7%,
+    #84cc16 7%,
+    #84cc16 15%,
+    #eab308 15%,
+    #eab308 38%,
+    #f97316 38%,
+    #f97316 45%,
+    #ef4444 45%,
+    #ef4444 100%
+  );
+}
