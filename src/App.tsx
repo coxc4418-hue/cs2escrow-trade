@@ -1,19 +1,28 @@
 import { useEffect, useState } from 'react';
 import { CheckCircle2, Loader2 } from 'lucide-react';
 import { onAuthStateChanged, signOut, type User as FirebaseUser } from 'firebase/auth';
-import { auth } from './firebase';
 import {
-  buildInitialOrders,
+  collection,
+  doc,
+  getDoc,
+  onSnapshot,
+  query,
+  setDoc,
+  updateDoc,
+  where,
+} from 'firebase/firestore';
+import { auth, db } from './firebase';
+import {
+  ADMIN_EMAILS,
   computeSplit,
-  DEFAULT_SESSION,
-  INITIAL_REFERRALS,
+  makeReferralCode,
   PLATFORM_FEE_RATE,
   type EscrowOrder,
   type MarketCategory,
   type MarketItem,
   type PayCurrency,
   type ReferralRecord,
-  type UserSession,
+  type UserProfile,
 } from './data/market';
 import { AuthGate } from './components/AuthGate';
 import { Navbar, type AppView } from './components/Navbar';
@@ -46,133 +55,113 @@ function nowTime() {
   return new Date().toLocaleTimeString('es-VE', { hour12: false });
 }
 
-function randomHash(len = 48) {
-  const chars = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
-  let out = '';
-  for (let i = 0; i < len; i++) out += chars[Math.floor(Math.random() * chars.length)];
-  return out;
+function todayShort() {
+  return new Date().toLocaleDateString('es-VE', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+  });
+}
+
+async function checkSolanaTxOnChain(txHash: string): Promise<'confirmed' | 'unconfirmed'> {
+  try {
+    const res = await fetch('https://api.mainnet-beta.solana.com', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'getSignatureStatuses',
+        params: [[txHash], { searchTransactionHistory: true }],
+      }),
+    });
+    const data = await res.json();
+    const status = data?.result?.value?.[0];
+    if (status && !status.err && (status.confirmationStatus === 'confirmed' || status.confirmationStatus === 'finalized')) {
+      return 'confirmed';
+    }
+  } catch {
+    // RPC público puede tener rate limit; se registra pendiente de verificación
+  }
+  return 'unconfirmed';
 }
 
 export default function App() {
   const [authUser, setAuthUser] = useState<FirebaseUser | null>(null);
   const [authReady, setAuthReady] = useState(false);
+  const [profile, setProfile] = useState<UserProfile | null>(null);
   const [urlRefCode, setUrlRefCode] = useState<string | null>(null);
 
   const [activeView, setActiveView] = useState<AppView>('market');
   const [activeCategory, setActiveCategory] = useState<MarketCategory>('featured');
   const [searchQuery, setSearchQuery] = useState('');
-  const [catalog, setCatalog] = useState<MarketItem[]>([]);
+  const [baseCatalog, setBaseCatalog] = useState<MarketItem[]>([]);
+  const [liveListings, setLiveListings] = useState<MarketItem[]>([]);
   const [loadingCatalog, setLoadingCatalog] = useState(true);
   const [solPriceUsd, setSolPriceUsd] = useState<number>(185);
 
-  const [session, setSession] = useState<UserSession>(() => {
-    try {
-      const saved = localStorage.getItem('cs2market.session.v2');
-      return saved ? JSON.parse(saved) : DEFAULT_SESSION;
-    } catch {
-      return DEFAULT_SESSION;
-    }
-  });
-
-  const [cart, setCart] = useState<MarketItem[]>(() => {
-    try {
-      const saved = localStorage.getItem('cs2market.cart.v2');
-      return saved ? JSON.parse(saved) : [];
-    } catch {
-      return [];
-    }
-  });
-
-  const [orders, setOrders] = useState<EscrowOrder[]>(() => {
-    try {
-      const saved = localStorage.getItem('cs2market.orders.v2');
-      return saved ? JSON.parse(saved) : [];
-    } catch {
-      return [];
-    }
-  });
-
-  const [referrals, setReferrals] = useState<ReferralRecord[]>(() => {
-    try {
-      const saved = localStorage.getItem('cs2market.referrals.v2');
-      return saved ? JSON.parse(saved) : INITIAL_REFERRALS;
-    } catch {
-      return INITIAL_REFERRALS;
-    }
-  });
+  const [cart, setCart] = useState<MarketItem[]>([]);
+  const [orders, setOrders] = useState<EscrowOrder[]>([]);
+  const [referrals, setReferrals] = useState<ReferralRecord[]>([]);
 
   const [selectedItem, setSelectedItem] = useState<MarketItem | null>(null);
   const [cartOpen, setCartOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
 
-  const notify = (msg: string) => {
-    setToast(msg);
-  };
+  const notify = (msg: string) => setToast(msg);
 
   useEffect(() => {
     if (!toast) return;
-    const t = setTimeout(() => setToast(null), 3800);
+    const t = setTimeout(() => setToast(null), 4000);
     return () => clearTimeout(t);
   }, [toast]);
 
-  // Listen to Firebase Auth state (blocks app until authenticated)
+  // Capture ?ref=CODIGO from URL and keep it until registration finishes
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const refParam = params.get('ref')?.trim().toUpperCase();
+    if (refParam && refParam.length >= 4) {
+      setUrlRefCode(refParam);
+      try {
+        sessionStorage.setItem('cs2market.pending_ref', refParam);
+      } catch {
+        // ignore
+      }
+    } else {
+      try {
+        const stored = sessionStorage.getItem('cs2market.pending_ref');
+        if (stored) setUrlRefCode(stored);
+      } catch {
+        // ignore
+      }
+    }
+  }, []);
+
+  // Firebase Auth listener
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (fbUser) => {
       setAuthUser(fbUser);
       setAuthReady(true);
-      if (fbUser) {
-        const name =
-          fbUser.displayName?.trim() ||
-          fbUser.email?.split('@')[0] ||
-          DEFAULT_SESSION.steamName;
-        setSession((prev) => ({
-          ...prev,
-          loggedIn: true,
-          steamName: name,
-        }));
+      if (!fbUser) {
+        setProfile(null);
+        setOrders([]);
+        setReferrals([]);
+        setCart([]);
       }
     });
     return () => unsub();
   }, []);
 
-  // Capture ?ref=CODIGO_AFILIADO for lifetime attribution (with anti self-referral check)
-  useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const refParam = params.get('ref')?.trim().toUpperCase();
-    if (refParam && refParam.length >= 3) {
-      setUrlRefCode(refParam);
-      setSession((prev) => {
-        if (refParam === prev.referralCode.toUpperCase()) {
-          notify('Bloqueo anti-auto-referido: no puedes vincularte con tu propio código.');
-          return prev;
-        }
-        if (prev.referredByCode !== refParam) {
-          return { ...prev, referredByCode: refParam };
-        }
-        return prev;
-      });
-    }
-  }, []);
-
-  // Load real Valve/ByMykel + CSGOTrader catalog.json + user-published items
+  // Load real Valve/ByMykel + CSGOTrader catalog.json + SOL price
   useEffect(() => {
     let alive = true;
     fetch('/catalog.json')
       .then((r) => r.json())
       .then((data) => {
         if (!alive) return;
-        const baseItems: MarketItem[] = Array.isArray(data?.items) ? data.items : [];
-        let userItems: MarketItem[] = [];
-        try {
-          const savedUser = localStorage.getItem('cs2market.user_listings.v2');
-          userItems = savedUser ? JSON.parse(savedUser) : [];
-        } catch {
-          userItems = [];
-        }
-        const merged = [...userItems, ...baseItems];
-        setCatalog(merged);
-        setOrders((prev) => (prev.length > 0 ? prev : buildInitialOrders(merged)));
+        const items: MarketItem[] = Array.isArray(data?.items) ? data.items : [];
+        setBaseCatalog(items);
         setLoadingCatalog(false);
       })
       .catch(() => {
@@ -185,73 +174,283 @@ export default function App() {
         const p = Number(d?.solana?.usd);
         if (alive && p > 10) setSolPriceUsd(p);
       })
-      .catch(() => {
-        // silent fallback
-      });
+      .catch(() => {});
 
     return () => {
       alive = false;
     };
   }, []);
 
-  // Persist state
+  // Ensure real Firestore UserProfile (starts with balanceUsdc: 0, 0 referrals, 0 orders) & live subscriptions
   useEffect(() => {
-    try {
-      localStorage.setItem('cs2market.session.v2', JSON.stringify(session));
-    } catch {
-      // ignore
-    }
-  }, [session]);
+    if (!authUser) return;
 
-  useEffect(() => {
-    try {
-      localStorage.setItem('cs2market.cart.v2', JSON.stringify(cart));
-    } catch {
-      // ignore
-    }
-  }, [cart]);
+    let unsubProfile: (() => void) | undefined;
+    let unsubListings: (() => void) | undefined;
+    let unsubBuyerOrders: (() => void) | undefined;
+    let unsubSellerOrders: (() => void) | undefined;
+    let unsubAllOrders: (() => void) | undefined;
+    let unsubReferrals: (() => void) | undefined;
 
-  useEffect(() => {
-    try {
-      if (orders.length > 0) {
-        localStorage.setItem('cs2market.orders.v2', JSON.stringify(orders));
+    const uid = authUser.uid;
+    const email = (authUser.email || '').toLowerCase();
+    const isAdminAccount = ADMIN_EMAILS.includes(email);
+
+    const initUser = async () => {
+      const userRef = doc(db, 'users', uid);
+      const snap = await getDoc(userRef);
+
+      if (!snap.exists()) {
+        const myCode = makeReferralCode(uid);
+        let referredByCode: string | null = null;
+        let referredByUid: string | null = null;
+
+        // Check lifetime referral attribution if user arrived via ?ref=CODE
+        const pendingRef = urlRefCode?.trim().toUpperCase();
+        if (pendingRef && pendingRef !== myCode) {
+          try {
+            const refCodeSnap = await getDoc(doc(db, 'referral_codes', pendingRef));
+            if (refCodeSnap.exists()) {
+              const refOwnerUid = String(refCodeSnap.data()?.uid || '');
+              if (refOwnerUid && refOwnerUid !== uid) {
+                referredByCode = pendingRef;
+                referredByUid = refOwnerUid;
+              }
+            }
+          } catch {
+            // ignore
+          }
+        }
+
+        const freshProfile: UserProfile = {
+          uid,
+          email: authUser.email || '',
+          displayName: authUser.displayName?.trim() || email.split('@')[0] || 'Operador',
+          photoURL: authUser.photoURL || '',
+          role: 'user',
+          steamId64: '',
+          tradeUrl: '',
+          steamGuardMobile: false,
+          walletAddress: '',
+          walletProvider: null,
+          walletSigned: false,
+          balanceUsdc: 0,
+          referralCode: myCode,
+          referredByCode,
+          referredByUid,
+          createdAt: new Date().toISOString(),
+        };
+
+        await setDoc(userRef, freshProfile);
+
+        // Register unique referral code lookup
+        try {
+          await setDoc(doc(db, 'referral_codes', myCode), {
+            uid,
+            code: myCode,
+            createdAt: freshProfile.createdAt,
+          });
+        } catch {
+          // code already registered
+        }
+
+        // Create real referral attribution record (starts at $0.00 and 0 trades)
+        if (referredByUid) {
+          try {
+            await setDoc(doc(db, 'referrals', uid), {
+              id: uid,
+              referrerUid: referredByUid,
+              referredUid: uid,
+              steamId64: '',
+              username: freshProfile.displayName,
+              email: freshProfile.email,
+              joinedAt: todayShort(),
+              tradesCount: 0,
+              volumeUsdc: 0,
+              earnedUsdc: 0,
+            });
+          } catch {
+            // ignore
+          }
+        }
       }
-    } catch {
-      // ignore
-    }
-  }, [orders]);
 
-  useEffect(() => {
-    try {
-      localStorage.setItem('cs2market.referrals.v2', JSON.stringify(referrals));
-    } catch {
-      // ignore
-    }
-  }, [referrals]);
+      // Live profile listener
+      unsubProfile = onSnapshot(userRef, (docSnap) => {
+        if (docSnap.exists()) {
+          const data = docSnap.data() as UserProfile;
+          setProfile({
+            ...data,
+            displayName: data.displayName || authUser.displayName || email.split('@')[0] || 'Operador',
+            photoURL: data.photoURL || authUser.photoURL || '',
+            balanceUsdc: Number(data.balanceUsdc) || 0,
+          });
+        }
+      });
 
-  // Splash while checking Firebase session
-  if (!authReady) {
+      // Live listings listener (user-published skins in real time)
+      unsubListings = onSnapshot(collection(db, 'listings'), (qSnap) => {
+        const list: MarketItem[] = [];
+        qSnap.forEach((d) => {
+          list.push(d.data() as MarketItem);
+        });
+        list.sort((a, b) => (b.id > a.id ? 1 : -1));
+        setLiveListings(list);
+      });
+
+      // Live orders listener (only real orders belonging to this user, or all for admin)
+      if (isAdminAccount) {
+        unsubAllOrders = onSnapshot(collection(db, 'orders'), (qSnap) => {
+          const list = qSnap.docs
+            .map((d) => d.data() as EscrowOrder)
+            .sort((a, b) => (b.createdAtMs || 0) - (a.createdAtMs || 0));
+          setOrders(list);
+        });
+      } else {
+        let buyerList: EscrowOrder[] = [];
+        let sellerList: EscrowOrder[] = [];
+        const mergeOrders = () => {
+          const map = new Map<string, EscrowOrder>();
+          [...buyerList, ...sellerList].forEach((o) => map.set(o.id, o));
+          setOrders(
+            Array.from(map.values()).sort((a, b) => (b.createdAtMs || 0) - (a.createdAtMs || 0)),
+          );
+        };
+        unsubBuyerOrders = onSnapshot(
+          query(collection(db, 'orders'), where('buyerUid', '==', uid)),
+          (qSnap) => {
+            buyerList = qSnap.docs.map((d) => d.data() as EscrowOrder);
+            mergeOrders();
+          },
+        );
+        unsubSellerOrders = onSnapshot(
+          query(collection(db, 'orders'), where('sellerUid', '==', uid)),
+          (qSnap) => {
+            sellerList = qSnap.docs.map((d) => d.data() as EscrowOrder);
+            mergeOrders();
+          },
+        );
+      }
+
+      // Live referrals listener (starts at 0 until someone registers with your ?ref= link)
+      unsubReferrals = onSnapshot(
+        query(collection(db, 'referrals'), where('referrerUid', '==', uid)),
+        (qSnap) => {
+          setReferrals(qSnap.docs.map((d) => d.data() as ReferralRecord));
+        },
+      );
+    };
+
+    initUser().catch((err) => {
+      console.error('Firestore init error:', err);
+      // Fallback in-memory clean $0 profile if network hiccups
+      setProfile({
+        uid,
+        email: authUser.email || '',
+        displayName: authUser.displayName?.trim() || email.split('@')[0] || 'Operador',
+        photoURL: authUser.photoURL || '',
+        role: isAdminAccount ? 'admin' : 'user',
+        steamId64: '',
+        tradeUrl: '',
+        steamGuardMobile: false,
+        walletAddress: '',
+        walletProvider: null,
+        walletSigned: false,
+        balanceUsdc: 0,
+        referralCode: makeReferralCode(uid),
+        referredByCode: null,
+        referredByUid: null,
+        createdAt: new Date().toISOString(),
+      });
+    });
+
+    return () => {
+      unsubProfile?.();
+      unsubListings?.();
+      unsubBuyerOrders?.();
+      unsubSellerOrders?.();
+      unsubAllOrders?.();
+      unsubReferrals?.();
+    };
+  }, [authUser, urlRefCode]);
+
+  if (!authReady || (authUser && !profile)) {
     return (
-      <div className="flex min-h-screen flex-col items-center justify-center bg-[#0c1018] text-slate-200">
+      <div className="flex min-h-screen flex-col items-center justify-center bg-[#090d14] text-slate-200">
         <Loader2 className="h-9 w-9 animate-spin text-emerald-400" />
         <p className="mt-3 font-cs text-lg tracking-widest text-white">CS2 MARKET</p>
-        <p className="mt-1 font-mono text-[11px] text-slate-400">Verificando sesión segura...</p>
+        <p className="mt-1 font-mono text-[11px] text-slate-400">Cargando tu cuenta...</p>
       </div>
     );
   }
 
-  // Gate: require real Firebase Login / Register (Google or Email/Password) before accessing system
-  if (!authUser) {
+  if (!authUser || !profile) {
     return <AuthGate referralCodeFromUrl={urlRefCode} />;
   }
+
+  const isAdmin =
+    profile.role === 'admin' || ADMIN_EMAILS.includes((profile.email || '').toLowerCase());
+  const fullCatalog = [...liveListings, ...baseCatalog];
 
   const handleChangeView = (view: AppView) => {
     setActiveView(view);
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
-  const handleUpdateSession = (patch: Partial<UserSession>) => {
-    setSession((prev) => ({ ...prev, ...patch }));
+  const handleSaveProfile = async (patch: Partial<UserProfile>) => {
+    try {
+      const safePatch = { ...patch };
+      delete safePatch.balanceUsdc;
+      delete safePatch.role;
+      await updateDoc(doc(db, 'users', profile.uid), safePatch);
+      notify('Perfil actualizado correctamente.');
+    } catch {
+      notify('No se pudo guardar el perfil. Verifica tu conexión.');
+    }
+  };
+
+  const handleConnectWallet = async (provider: 'Phantom' | 'Solflare') => {
+    try {
+      if (provider === 'Phantom' && window.solana?.isPhantom) {
+        const resp = await window.solana.connect();
+        const addr = resp.publicKey.toString();
+        let signed = false;
+        if (window.solana.signMessage) {
+          const encoded = new TextEncoder().encode(
+            `CS2 MARKET — Verificación de propiedad de wallet sin gas (${profile.uid})`,
+          );
+          await window.solana.signMessage(encoded, 'utf8');
+          signed = true;
+        }
+        await handleSaveProfile({
+          walletProvider: 'Phantom',
+          walletAddress: addr,
+          walletSigned: signed,
+        });
+        notify(`Phantom vinculada: ${addr.slice(0, 6)}…${addr.slice(-4)}`);
+        return;
+      }
+
+      if (provider === 'Solflare' && window.solflare?.isSolflare) {
+        await window.solflare.connect();
+        const addr = window.solflare.publicKey?.toString();
+        if (addr) {
+          await handleSaveProfile({
+            walletProvider: 'Solflare',
+            walletAddress: addr,
+            walletSigned: true,
+          });
+          notify(`Solflare vinculada: ${addr.slice(0, 6)}…${addr.slice(-4)}`);
+          return;
+        }
+      }
+
+      notify(
+        `No se detectó la extensión ${provider} en este navegador. Puedes pegar tu dirección Solana manualmente.`,
+      );
+    } catch {
+      notify(`Conexión con ${provider} cancelada.`);
+    }
   };
 
   const handleLogout = async () => {
@@ -260,52 +459,6 @@ export default function App() {
       setProfileOpen(false);
     } catch {
       notify('No se pudo cerrar sesión.');
-    }
-  };
-
-  const handleConnectRealWallet = async (provider: 'Phantom' | 'Solflare' | 'Demo') => {
-    if (provider === 'Demo') {
-      handleUpdateSession({
-        walletProvider: 'Demo',
-        walletAddress: DEFAULT_SESSION.walletAddress,
-        walletSigned: true,
-      });
-      notify('Wallet Solana en Modo Demo activa.');
-      return;
-    }
-
-    try {
-      if (provider === 'Phantom' && window.solana?.isPhantom) {
-        const resp = await window.solana.connect();
-        const addr = resp.publicKey.toString();
-        let signed = false;
-        if (window.solana.signMessage) {
-          const encoded = new TextEncoder().encode(
-            `CS2 MARKET — Verificación de propiedad de wallet sin gas (${session.steamId64})`,
-          );
-          await window.solana.signMessage(encoded, 'utf8');
-          signed = true;
-        }
-        handleUpdateSession({ walletProvider: 'Phantom', walletAddress: addr, walletSigned: signed });
-        notify(`Phantom conectado: ${addr.slice(0, 6)}…${addr.slice(-4)}`);
-        return;
-      }
-
-      if (provider === 'Solflare' && window.solflare?.isSolflare) {
-        await window.solflare.connect();
-        const addr = window.solflare.publicKey?.toString();
-        if (addr) {
-          handleUpdateSession({ walletProvider: 'Solflare', walletAddress: addr, walletSigned: true });
-          notify(`Solflare conectado: ${addr.slice(0, 6)}…${addr.slice(-4)}`);
-          return;
-        }
-      }
-
-      notify(
-        `No se detectó la extensión ${provider} en este navegador. Manteniendo Modo Demo listo.`,
-      );
-    } catch {
-      notify(`Conexión con ${provider} cancelada por el usuario.`);
     }
   };
 
@@ -320,218 +473,172 @@ export default function App() {
     });
   };
 
-  const createEscrowOrders = (itemsToBuy: MarketItem[], currency: PayCurrency) => {
-    const created: EscrowOrder[] = itemsToBuy.map((item, idx) => {
-      const hasRef = Boolean(session.referredByCode);
-      const split = computeSplit(item.priceUsdc, hasRef);
-      return {
-        id: `ESC-${Math.floor(1000 + Math.random() * 9000) + idx}`,
-        item,
-        buyerName: session.steamName,
-        sellerName: item.seller.steamName,
-        currency,
-        grossUsdc: item.priceUsdc,
-        platformFeeRate: PLATFORM_FEE_RATE,
-        platformFeeUsdc: split.feeTotal,
-        platformNetUsdc: split.platformNet,
-        referrerCode: session.referredByCode,
-        referrerPayoutUsdc: split.referrerPayout,
-        sellerNetPayoutUsdc: split.sellerNet,
-        solanaRentUsdc: 0.001,
-        status: 'CREATED',
-        tradeHoldDays: item.tradeHoldDays,
-        createdAt: 'Ahora mismo',
-        buyerTradeUrl: session.tradeUrl,
-        logs: [
-          {
-            at: nowTime(),
-            actor: 'SISTEMA',
-            action: `Orden creada en ${currency} ($${item.priceUsdc.toFixed(2)}). Split configurado: 97% vendedor ($${split.sellerNet.toFixed(2)}) · ${hasRef ? `1.5% plataforma / 1.5% referidor ${session.referredByCode}` : '3% plataforma'}.`,
-          },
-        ],
-      };
-    });
-
-    setOrders((prev) => [...created, ...prev]);
-    setCart([]);
-    setCartOpen(false);
-    handleChangeView('escrow');
-    notify(
-      created.length === 1
-        ? `Escrow ${created[0].id} creado. Confirma el pago en Solana.`
-        : `${created.length} órdenes de Escrow creadas en Solana.`,
-    );
-  };
-
-  const handleSimulatePay = (orderId: string) => {
-    const txHash = randomHash(48);
-    setOrders((prev) =>
-      prev.map((o) => {
-        if (o.id !== orderId) return o;
-        const nextStatus = o.tradeHoldDays > 0 ? 'ESCROW_HELD' : 'PAID';
-        return {
-          ...o,
-          status: nextStatus,
-          solanaTxHash: txHash,
-          logs: [
-            ...o.logs,
-            {
-              at: nowTime(),
-              actor: 'SOLANA_RPC',
-              action: `getTransaction(confirmed) en 410ms · Tx ${txHash.slice(0, 14)}… · Publicación marcada RESERVED.`,
-            },
-            ...(o.tradeHoldDays > 0
-              ? [
-                  {
-                    at: nowTime(),
-                    actor: 'STEAM_P2P' as const,
-                    action:
-                      'Escrow Steam 7 días activo: capital USDC bloqueado en custodia hasta expirar retención de seguridad.',
-                  },
-                ]
-              : []),
-          ],
-        };
-      }),
-    );
-    notify('Pago Solana verificado on-chain (~400ms). Fondos resguardados en Escrow.');
-  };
-
-  const handleSimulateTradeSent = (orderId: string) => {
-    setOrders((prev) =>
-      prev.map((o) => {
-        if (o.id !== orderId) return o;
-        return {
-          ...o,
-          status: 'TRADE_SENT',
-          logs: [
-            ...o.logs,
-            {
-              at: nowTime(),
-              actor: 'VENDEDOR',
-              action: `Trade Offer P2P enviado directo a la Trade URL del comprador (sin bots intermedios).`,
-            },
-          ],
-        };
-      }),
-    );
-    notify('Trade Offer P2P enviado. Acepta en Steam y libera el Split 3 vías.');
-  };
-
-  const handleConfirmRelease = (orderId: string) => {
-    const payoutHash = randomHash(48);
-    setOrders((prev) =>
-      prev.map((o) => {
-        if (o.id !== orderId) return o;
-        return {
-          ...o,
-          status: 'RELEASED',
-          payoutTxHash: payoutHash,
-          logs: [
-            ...o.logs,
-            {
-              at: nowTime(),
-              actor: 'STEAM_P2P',
-              action: 'Verificador de inventario confirmó el asset_id en la mochila del comprador.',
-            },
-            {
-              at: nowTime(),
-              actor: 'SOLANA_RPC',
-              action: `Split atómico 3 vías ejecutado (Tx ${payoutHash.slice(0, 12)}…): $${o.sellerNetPayoutUsdc.toFixed(2)} vendedor · $${o.platformNetUsdc.toFixed(2)} plataforma · $${o.referrerPayoutUsdc.toFixed(2)} referidor.`,
-            },
-          ],
-        };
-      }),
-    );
-    notify('¡Escrow liberado! Liquidación atómica 3 vías (97% / 1.5% / 1.5%) completada en Solana.');
-  };
-
-  const handleOpenDispute = (orderId: string, reason: string) => {
-    setOrders((prev) =>
-      prev.map((o) => {
-        if (o.id !== orderId) return o;
-        return {
-          ...o,
-          status: 'DISPUTED',
-          disputeReason: reason,
-          disputeEvidence: 'Verificación de inventario público Steam adjuntada automáticamente.',
-          logs: [
-            ...o.logs,
-            {
-              at: nowTime(),
-              actor: 'COMPRADOR',
-              action: `Disputa abierta (<48h SLA): ${reason}`,
-            },
-          ],
-        };
-      }),
-    );
-    notify('Disputa registrada y fondos congelados. Resuélvela desde la pestaña Admin.');
-  };
-
-  const handleResolveDispute = (orderId: string, decision: 'RELEASE' | 'REFUND') => {
-    const txHash = randomHash(48);
-    setOrders((prev) =>
-      prev.map((o) => {
-        if (o.id !== orderId) return o;
-        return {
-          ...o,
-          status: decision === 'RELEASE' ? 'RELEASED' : 'REFUNDED',
-          payoutTxHash: txHash,
-          adminResolution:
-            decision === 'RELEASE'
-              ? 'Admin aprobó liberación con Split 3 vías.'
-              : 'Admin ejecutó reembolso completo al comprador.',
-          logs: [
-            ...o.logs,
-            {
-              at: nowTime(),
-              actor: 'ADMIN',
-              action:
-                decision === 'RELEASE'
-                  ? `Doble confirmación: Split 3 vías ejecutado (Tx ${txHash.slice(0, 12)}…).`
-                  : `Doble confirmación: Reembolso de $${o.grossUsdc.toFixed(2)} al comprador (Tx ${txHash.slice(0, 12)}…).`,
-            },
-          ],
-        };
-      }),
-    );
-    notify(
-      decision === 'RELEASE'
-        ? 'Disputa resuelta: fondos dispersados (97% / 1.5% / 1.5%).'
-        : 'Disputa resuelta: reembolso enviado al comprador.',
-    );
-  };
-
-  const handlePublishItem = (item: MarketItem) => {
-    setCatalog((prev) => [item, ...prev]);
-    try {
-      const existing = JSON.parse(localStorage.getItem('cs2market.user_listings.v2') || '[]');
-      localStorage.setItem('cs2market.user_listings.v2', JSON.stringify([item, ...existing]));
-    } catch {
-      // ignore
+  const createEscrowOrders = async (itemsToBuy: MarketItem[], currency: PayCurrency) => {
+    if (!profile.walletAddress || !profile.tradeUrl) {
+      notify('Configura tu Wallet Solana y tu Trade URL P2P antes de crear una orden.');
+      setProfileOpen(true);
+      return;
     }
+
+    const nowMs = Date.now();
+    try {
+      for (let idx = 0; idx < itemsToBuy.length; idx++) {
+        const item = itemsToBuy[idx];
+        const hasRef = Boolean(profile.referredByCode);
+        const split = computeSplit(item.priceUsdc, hasRef);
+        const orderId = `ESC-${String(nowMs + idx).slice(-6)}`;
+        const order: EscrowOrder = {
+          id: orderId,
+          buyerUid: profile.uid,
+          sellerUid: item.sellerUid || 'CATALOG_VERIFIED',
+          item,
+          buyerName: profile.displayName,
+          sellerName: item.seller.steamName,
+          currency,
+          grossUsdc: item.priceUsdc,
+          platformFeeRate: PLATFORM_FEE_RATE,
+          platformFeeUsdc: split.feeTotal,
+          platformNetUsdc: split.platformNet,
+          referrerCode: profile.referredByCode,
+          referrerPayoutUsdc: split.referrerPayout,
+          sellerNetPayoutUsdc: split.sellerNet,
+          solanaRentUsdc: 0.001,
+          status: 'CREATED',
+          tradeHoldDays: item.tradeHoldDays,
+          createdAt: todayShort(),
+          createdAtMs: nowMs + idx,
+          buyerTradeUrl: profile.tradeUrl,
+          logs: [
+            {
+              at: nowTime(),
+              actor: 'SISTEMA',
+              action: `Orden ${orderId} creada (${currency} · $${item.priceUsdc.toFixed(2)}). Esperando firma de transacción Solana.`,
+            },
+          ],
+        };
+        await setDoc(doc(db, 'orders', orderId), order);
+      }
+
+      setCart([]);
+      setCartOpen(false);
+      handleChangeView('escrow');
+      notify('Orden de Escrow creada. Registra tu firma de transacción Solana para continuar.');
+    } catch {
+      notify('No se pudo crear la orden en este momento.');
+    }
+  };
+
+  const handleSubmitPaymentHash = async (orderId: string, txHash: string) => {
+    const target = orders.find((o) => o.id === orderId);
+    if (!target) return;
+
+    const rpcStatus = await checkSolanaTxOnChain(txHash);
+    const nextStatus = target.tradeHoldDays > 0 ? 'ESCROW_HELD' : 'PAID';
+
+    await updateDoc(doc(db, 'orders', orderId), {
+      status: nextStatus,
+      solanaTxHash: txHash,
+      logs: [
+        ...target.logs,
+        {
+          at: nowTime(),
+          actor: 'SOLANA_RPC',
+          action:
+            rpcStatus === 'confirmed'
+              ? `Transacción Solana CONFIRMADA on-chain (${txHash.slice(0, 14)}…). Fondos en Escrow.`
+              : `Firma Solana registrada (${txHash.slice(0, 14)}…). En espera de confirmación/validación on-chain.`,
+        },
+      ],
+    });
+    notify(
+      rpcStatus === 'confirmed'
+        ? 'Transacción confirmada en Solana Mainnet.'
+        : 'Firma de transacción registrada en tu orden de Escrow.',
+    );
+  };
+
+  const handleMarkTradeSent = async (orderId: string) => {
+    const target = orders.find((o) => o.id === orderId);
+    if (!target) return;
+    await updateDoc(doc(db, 'orders', orderId), {
+      status: 'TRADE_SENT',
+      logs: [
+        ...target.logs,
+        {
+          at: nowTime(),
+          actor: 'VENDEDOR',
+          action: 'Vendedor notificó el envío del Trade Offer P2P en Steam.',
+        },
+      ],
+    });
+    notify('Trade Offer marcado como enviado.');
+  };
+
+  const handleConfirmReceipt = async (orderId: string) => {
+    const target = orders.find((o) => o.id === orderId);
+    if (!target) return;
+    await updateDoc(doc(db, 'orders', orderId), {
+      status: 'RELEASED',
+      logs: [
+        ...target.logs,
+        {
+          at: nowTime(),
+          actor: 'COMPRADOR',
+          action: `Recepción confirmada en inventario Steam. Liquidación 3 vías habilitada ($${target.sellerNetPayoutUsdc.toFixed(2)} vendedor / $${target.platformNetUsdc.toFixed(2)} plataforma / $${target.referrerPayoutUsdc.toFixed(2)} referidor).`,
+        },
+      ],
+    });
+    notify('Recepción confirmada y orden marcada como liberada.');
+  };
+
+  const handleOpenDispute = async (orderId: string, reason: string) => {
+    const target = orders.find((o) => o.id === orderId);
+    if (!target) return;
+    await updateDoc(doc(db, 'orders', orderId), {
+      status: 'DISPUTED',
+      disputeReason: reason,
+      disputeEvidence: 'Pendiente verificación de inventario público Steam por soporte.',
+      logs: [
+        ...target.logs,
+        {
+          at: nowTime(),
+          actor: 'COMPRADOR',
+          action: `Disputa abierta (<48h SLA): ${reason}`,
+        },
+      ],
+    });
+    notify('Disputa abierta. Los fondos permanecen congelados hasta resolución.');
+  };
+
+  const handleResolveDispute = async (orderId: string, decision: 'RELEASE' | 'REFUND') => {
+    const target = orders.find((o) => o.id === orderId);
+    if (!target) return;
+    await updateDoc(doc(db, 'orders', orderId), {
+      status: decision === 'RELEASE' ? 'RELEASED' : 'REFUNDED',
+      adminResolution:
+        decision === 'RELEASE'
+          ? 'Administrador aprobó liberación de fondos al vendedor.'
+          : 'Administrador aprobó reembolso al comprador.',
+      logs: [
+        ...target.logs,
+        {
+          at: nowTime(),
+          actor: 'ADMIN',
+          action:
+            decision === 'RELEASE'
+              ? 'Resolución con doble confirmación: liberar fondos al vendedor.'
+              : 'Resolución con doble confirmación: reembolsar fondos al comprador.',
+        },
+      ],
+    });
+    notify('Disputa resuelta y registrada en el historial de auditoría.');
+  };
+
+  const handlePublishItem = async (item: MarketItem) => {
+    await setDoc(doc(db, 'listings', item.id), item);
     setActiveCategory('featured');
     handleChangeView('market');
-    notify(
-      item.tradeHoldDays > 0
-        ? `Publicada con etiqueta "EN ESPERA (ESCROW) 7 días": ${item.name}`
-        : `Publicada con Entrega P2P Inmediata: ${item.name}`,
-    );
-  };
-
-  const handleSimulateNewReferral = (username: string) => {
-    const newRec: ReferralRecord = {
-      id: `ref-${Date.now()}`,
-      steamId64: `76561198${Math.floor(100000000 + Math.random() * 899999999)}`,
-      username,
-      joinedAt: 'Ahora mismo',
-      tradesCount: 1,
-      volumeUsdc: 220.0,
-      earnedUsdc: 3.3,
-    };
-    setReferrals((prev) => [newRec, ...prev]);
-    notify(`Nuevo referido vinculado de por vida: ${username} (+$3.30 USDC 50% fee).`);
+    notify(`Publicación creada en vivo: ${item.name} ($${item.priceUsdc.toFixed(2)} USDC)`);
   };
 
   const activeEscrowCount = orders.filter(
@@ -550,12 +657,9 @@ export default function App() {
         onSearchChange={setSearchQuery}
         cartCount={cart.length}
         onOpenCart={() => setCartOpen(true)}
-        session={session}
-        authEmail={authUser.email}
-        authPhotoUrl={authUser.photoURL}
+        profile={profile}
+        isAdmin={isAdmin}
         onOpenProfile={() => setProfileOpen(true)}
-        onToggleSteamLogin={() => setProfileOpen(true)}
-        onConnectWallet={() => setProfileOpen(true)}
         activeEscrowCount={activeEscrowCount}
         openDisputeCount={openDisputeCount}
       />
@@ -563,7 +667,7 @@ export default function App() {
       <main className="mx-auto max-w-[1600px] px-3.5 py-5 sm:px-5 lg:px-7">
         {activeView === 'market' && (
           <MarketView
-            items={catalog}
+            items={fullCatalog}
             loading={loadingCatalog}
             activeCategory={activeCategory}
             searchQuery={searchQuery}
@@ -576,9 +680,9 @@ export default function App() {
 
         {activeView === 'sell' && (
           <SellInventoryView
-            catalog={catalog}
-            session={session}
-            onUpdateSession={handleUpdateSession}
+            catalog={fullCatalog}
+            profile={profile}
+            onOpenProfile={() => setProfileOpen(true)}
             onPublishItem={handlePublishItem}
             onNotify={notify}
           />
@@ -587,32 +691,29 @@ export default function App() {
         {activeView === 'escrow' && (
           <EscrowCenterView
             orders={orders}
-            onSimulatePay={handleSimulatePay}
-            onSimulateTradeSent={handleSimulateTradeSent}
-            onConfirmRelease={handleConfirmRelease}
+            currentUid={profile.uid}
+            onSubmitPaymentHash={handleSubmitPaymentHash}
+            onMarkTradeSent={handleMarkTradeSent}
+            onConfirmReceipt={handleConfirmReceipt}
             onOpenDispute={handleOpenDispute}
+            onNotify={notify}
           />
         )}
 
         {activeView === 'referrals' && (
-          <ReferralsView
-            session={session}
-            referrals={referrals}
-            onNotify={notify}
-            onSimulateNewReferral={handleSimulateNewReferral}
-          />
+          <ReferralsView profile={profile} referrals={referrals} onNotify={notify} />
         )}
 
         {activeView === 'guide' && <EscrowGuideView />}
 
-        {activeView === 'admin' && (
+        {activeView === 'admin' && isAdmin && (
           <AdminPanelView orders={orders} onResolveDispute={handleResolveDispute} />
         )}
       </main>
 
       <SkinModal
         item={selectedItem}
-        session={session}
+        profile={profile}
         onClose={() => setSelectedItem(null)}
         onAddToCart={handleAddToCart}
         onBuyNow={(it) => createEscrowOrders([it], 'USDC')}
@@ -623,23 +724,22 @@ export default function App() {
         open={cartOpen}
         onClose={() => setCartOpen(false)}
         cart={cart}
-        session={session}
+        profile={profile}
         solPriceUsd={solPriceUsd}
         onRemove={(id) => setCart((prev) => prev.filter((x) => x.id !== id))}
         onClear={() => setCart([])}
-        onConnectWallet={() => setProfileOpen(true)}
+        onOpenProfile={() => setProfileOpen(true)}
         onCheckout={(curr) => createEscrowOrders(cart, curr)}
       />
 
       <ProfileModal
         open={profileOpen}
         onClose={() => setProfileOpen(false)}
-        session={session}
-        authEmail={authUser.email}
-        authPhotoUrl={authUser.photoURL}
-        onUpdateSession={handleUpdateSession}
-        onConnectRealWallet={handleConnectRealWallet}
+        profile={profile}
+        onSaveProfile={handleSaveProfile}
+        onConnectWallet={handleConnectWallet}
         onLogout={handleLogout}
+        onNotify={notify}
       />
 
       {toast && (

@@ -36,6 +36,8 @@ export interface MarketItem {
   tradeHoldDays: number; // 0 = entrega instantánea P2P, 7 = retención seguridad Steam Guard
   escrowDaysElapsed?: number;
   featured?: boolean;
+  isLiveListing?: boolean;
+  sellerUid?: string;
   seller: {
     steamName: string;
     steamLevel: number;
@@ -55,6 +57,8 @@ export interface AuditEntry {
 
 export interface EscrowOrder {
   id: string;
+  buyerUid: string;
+  sellerUid: string;
   item: MarketItem;
   buyerName: string;
   sellerName: string;
@@ -66,10 +70,11 @@ export interface EscrowOrder {
   referrerCode?: string | null;
   referrerPayoutUsdc: number; // 50% de la comisión (1.5%)
   sellerNetPayoutUsdc: number; // 97.0%
-  solanaRentUsdc: number; // ~$0.001 red / $0.22 ATA primera vez
+  solanaRentUsdc: number;
   status: EscrowStatus;
   tradeHoldDays: number;
   createdAt: string;
+  createdAtMs: number;
   solanaTxHash?: string;
   payoutTxHash?: string;
   buyerTradeUrl?: string;
@@ -81,36 +86,43 @@ export interface EscrowOrder {
 
 export interface ReferralRecord {
   id: string;
+  referrerUid: string;
+  referredUid: string;
   steamId64: string;
   username: string;
+  email?: string;
   joinedAt: string;
   tradesCount: number;
   volumeUsdc: number;
-  earnedUsdc: number; // 50% de las comisiones vitalicio
+  earnedUsdc: number;
 }
 
-export interface UserSession {
-  loggedIn: boolean;
+export interface UserProfile {
+  uid: string;
+  email: string;
+  displayName: string;
+  photoURL: string;
+  role: 'user' | 'admin';
   steamId64: string;
-  steamName: string;
-  steamLevel: number;
-  cs2Hours: number;
-  accountYears: number;
-  vacBanned: boolean;
-  tradeBanned: boolean;
-  publicInventory: boolean;
-  steamGuardMobile: boolean;
   tradeUrl: string;
+  steamGuardMobile: boolean;
   walletAddress: string;
-  walletProvider: 'Demo' | 'Phantom' | 'Solflare';
+  walletProvider: 'Phantom' | 'Solflare' | 'Manual' | null;
   walletSigned: boolean;
-  balanceUsdc: number;
+  balanceUsdc: number; // Inicia siempre en 0.00
   referralCode: string;
   referredByCode: string | null;
+  referredByUid: string | null;
+  createdAt: string;
 }
 
 export const PLATFORM_FEE_RATE = 0.03; // 3.0% (97.0% vendedor / 1.5% plataforma / 1.5% referidor)
 export const REFERRER_SHARE_OF_FEE = 0.5; // 50% vitalicio
+
+// Wallet receptora de custodia Solana (configurable por el cliente antes de operar en Mainnet)
+export const ESCROW_CUSTODY_WALLET = 'PENDIENTE_WALLET_CUSTODIA_SOLANA';
+
+export const ADMIN_EMAILS = ['levayjorge@gmail.com', 'jhinnoriega567@gmail.com'];
 
 export const RARITY_META: Record<
   Rarity,
@@ -157,55 +169,14 @@ export const WEAR_DOT_COLOR: Record<WearCode, string> = {
   NONE: '#60a5fa',
 };
 
-export const DEFAULT_SESSION: UserSession = {
-  loggedIn: true,
-  steamId64: '76561198842019412',
-  steamName: 'Operador_CS2',
-  steamLevel: 58,
-  cs2Hours: 2340,
-  accountYears: 7,
-  vacBanned: false,
-  tradeBanned: false,
-  publicInventory: true,
-  steamGuardMobile: true,
-  tradeUrl: 'https://steamcommunity.com/tradeoffer/new/?partner=842019412&token=aB9xK2mQ',
-  walletAddress: '7xKq9mP3vN8wR2tL6sY1cF4hJ5bD9eG2uA8zX4nM9vP2',
-  walletProvider: 'Demo',
-  walletSigned: true,
-  balanceUsdc: 2450.0,
-  referralCode: 'CS2PRO50',
-  referredByCode: 'VALKYRIE',
-};
+export function makeReferralCode(uid: string): string {
+  const clean = uid.replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
+  return `CS2${clean.slice(0, 6)}`;
+}
 
-export const INITIAL_REFERRALS: ReferralRecord[] = [
-  {
-    id: 'ref-1',
-    steamId64: '76561199104822109',
-    username: 'Kuroi_AWP',
-    joinedAt: 'Hace 14 días',
-    tradesCount: 6,
-    volumeUsdc: 1840.5,
-    earnedUsdc: 27.61,
-  },
-  {
-    id: 'ref-2',
-    steamId64: '76561198339104582',
-    username: 'M4A1_Tactical',
-    joinedAt: 'Hace 9 días',
-    tradesCount: 3,
-    volumeUsdc: 920.0,
-    earnedUsdc: 13.8,
-  },
-  {
-    id: 'ref-3',
-    steamId64: '76561198772011894',
-    username: 'KnifeHunter_VE',
-    joinedAt: 'Hace 2 días',
-    tradesCount: 2,
-    volumeUsdc: 1490.0,
-    earnedUsdc: 22.35,
-  },
-];
+export function isValidSolanaAddress(addr: string): boolean {
+  return /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(addr.trim());
+}
 
 export function computeSplit(grossUsdc: number, hasReferrer: boolean) {
   const feeTotal = Number((grossUsdc * PLATFORM_FEE_RATE).toFixed(2));
@@ -213,83 +184,4 @@ export function computeSplit(grossUsdc: number, hasReferrer: boolean) {
   const platformNet = Number((feeTotal - referrerPayout).toFixed(2));
   const sellerNet = Number((grossUsdc - feeTotal).toFixed(2));
   return { feeTotal, referrerPayout, platformNet, sellerNet };
-}
-
-export function buildInitialOrders(catalog: MarketItem[]): EscrowOrder[] {
-  const first = catalog.find((c) => c.tradeHoldDays === 7) || catalog[0];
-  const second = catalog.find((c) => c.tradeHoldDays === 0 && c.id !== first?.id) || catalog[1];
-  if (!first || !second) return [];
-
-  const s1 = computeSplit(first.priceUsdc, true);
-  const s2 = computeSplit(second.priceUsdc, true);
-
-  return [
-    {
-      id: 'ESC-9041',
-      item: first,
-      buyerName: 'Operador_CS2',
-      sellerName: first.seller.steamName,
-      currency: 'USDC',
-      grossUsdc: first.priceUsdc,
-      platformFeeRate: PLATFORM_FEE_RATE,
-      platformFeeUsdc: s1.feeTotal,
-      platformNetUsdc: s1.platformNet,
-      referrerCode: 'VALKYRIE',
-      referrerPayoutUsdc: s1.referrerPayout,
-      sellerNetPayoutUsdc: s1.sellerNet,
-      solanaRentUsdc: 0.001,
-      status: 'ESCROW_HELD',
-      tradeHoldDays: 7,
-      createdAt: 'Hace 2 días',
-      solanaTxHash: '5kP9mQv3n8xR2tL6sY1cF4hJ5bD9eG2uA8zX4nM9vP2wQ3kR',
-      buyerTradeUrl: DEFAULT_SESSION.tradeUrl,
-      logs: [
-        {
-          at: '14:02:11',
-          actor: 'SOLANA_RPC',
-          action: `Pago verificado on-chain (${first.priceUsdc.toFixed(2)} USDC) en 420ms. Fondos bloqueados en Escrow.`,
-        },
-        {
-          at: '14:03:05',
-          actor: 'STEAM_P2P',
-          action:
-            'Vendedor sin Steam Guard Móvil >7 días: activada retención obligatoria de seguridad Valve (7 días). Capital resguardado en USDC.',
-        },
-      ],
-    },
-    {
-      id: 'ESC-9038',
-      item: second,
-      buyerName: 'DeltaBuyer_LATAM',
-      sellerName: second.seller.steamName,
-      currency: 'USDC',
-      grossUsdc: second.priceUsdc,
-      platformFeeRate: PLATFORM_FEE_RATE,
-      platformFeeUsdc: s2.feeTotal,
-      platformNetUsdc: s2.platformNet,
-      referrerCode: 'CS2PRO50',
-      referrerPayoutUsdc: s2.referrerPayout,
-      sellerNetPayoutUsdc: s2.sellerNet,
-      solanaRentUsdc: 0.001,
-      status: 'DISPUTED',
-      tradeHoldDays: 0,
-      createdAt: 'Hace 5h',
-      solanaTxHash: '3mX7qW9rT2pL8vN4kC6hJ1fB5dE9gU2aS8yZ4nM7cR1pK9',
-      buyerTradeUrl: 'https://steamcommunity.com/tradeoffer/new/?partner=711220391&token=kM8pZ1qW',
-      disputeReason: 'El vendedor canceló el Trade Offer P2P antes de que el comprador aceptara.',
-      disputeEvidence: 'Verificación de inventario público Steam: asset_id sigue en mochila del vendedor.',
-      logs: [
-        {
-          at: '11:10:02',
-          actor: 'SOLANA_RPC',
-          action: `Depósito confirmado (${second.priceUsdc.toFixed(2)} USDC) en Wallet Escrow.`,
-        },
-        {
-          at: '12:48:19',
-          actor: 'COMPRADOR',
-          action: 'Disputa abierta (<48h SLA). Fondos congelados hasta resolución del administrador.',
-        },
-      ],
-    },
-  ];
 }

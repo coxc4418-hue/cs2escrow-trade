@@ -12,12 +12,12 @@ import {
   computeSplit,
   RARITY_META,
   type MarketItem,
-  type UserSession,
+  type UserProfile,
 } from '../data/market';
 
 interface SkinModalProps {
   item: MarketItem | null;
-  session: UserSession;
+  profile: UserProfile;
   onClose: () => void;
   onAddToCart: (item: MarketItem) => void;
   onBuyNow: (item: MarketItem) => void;
@@ -26,7 +26,7 @@ interface SkinModalProps {
 
 export function SkinModal({
   item,
-  session,
+  profile,
   onClose,
   onAddToCart,
   onBuyNow,
@@ -35,7 +35,7 @@ export function SkinModal({
   if (!item) return null;
 
   const rMeta = RARITY_META[item.rarity];
-  const hasReferrer = Boolean(session.referredByCode);
+  const hasReferrer = Boolean(profile.referredByCode);
   const split = computeSplit(item.priceUsdc, hasReferrer);
   const savingsPct = Math.max(
     0,
@@ -60,7 +60,6 @@ export function SkinModal({
         className="max-h-[92vh] w-full max-w-3xl overflow-y-auto rounded-2xl border border-slate-700/80 bg-[#151b26] shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
-        {/* Top bar */}
         <div className="flex items-center justify-between border-b border-slate-800 px-5 py-3.5">
           <div className="flex items-center gap-2.5">
             <span
@@ -86,7 +85,6 @@ export function SkinModal({
         </div>
 
         <div className="grid gap-5 p-5 md:grid-cols-2">
-          {/* Left: Official Valve Image + Float Bar + Inspect Link */}
           <div className="space-y-4">
             <div className="relative flex h-56 items-center justify-center rounded-xl bg-white p-5">
               <span
@@ -123,7 +121,6 @@ export function SkinModal({
               </div>
             )}
 
-            {/* Seller + Steam Guard status */}
             <div className="rounded-xl border border-slate-800 bg-[#10151f] p-3.5 text-xs">
               <div className="flex items-center justify-between">
                 <span className="flex items-center gap-1.5 font-semibold text-white">
@@ -131,12 +128,11 @@ export function SkinModal({
                   {item.seller.steamName}
                 </span>
                 <span className="font-mono text-[10px] text-emerald-300">
-                  VAC CLEAN · {item.seller.completedTrades} TRADES
+                  {item.isLiveListing ? 'PUBLICACIÓN EN VIVO' : 'CATÁLOGO OFICIAL'}
                 </span>
               </div>
               <p className="mt-1 font-mono text-[11px] text-slate-400">
-                LVL {item.seller.steamLevel} · {item.seller.cs2Hours.toLocaleString()}h CS2 ·{' '}
-                {item.seller.accountYears} años en Steam
+                Steam Guard: {item.tradeHoldDays === 0 ? 'Activo (>7 días)' : 'Retención 7 días'}
               </p>
               <button
                 type="button"
@@ -149,7 +145,6 @@ export function SkinModal({
             </div>
           </div>
 
-          {/* Right: Escrow 7d Banner + Solana Split + Actions */}
           <div className="flex flex-col justify-between space-y-4">
             <div className="space-y-3.5">
               <div>
@@ -166,7 +161,6 @@ export function SkinModal({
                 </div>
               </div>
 
-              {/* Steam Escrow 7d vs Instant P2P Box */}
               {item.tradeHoldDays > 0 ? (
                 <div className="escrow-popover rounded-xl p-3.5">
                   <div className="flex items-center gap-2 text-xs font-bold text-white">
@@ -174,29 +168,27 @@ export function SkinModal({
                     EN ESPERA (ESCROW) — Demora de 7 días por seguridad
                   </div>
                   <p className="mt-1.5 text-[11px] leading-relaxed text-slate-300">
-                    Este vendedor no cumple aún 7 días con Steam Guard Móvil. Tu USDC queda{' '}
-                    <strong className="text-white">resguardado en el Escrow Solana</strong> durante
-                    la cuenta regresiva y solo se libera cuando el{' '}
-                    <code className="text-sky-300">asset_id</code> aparece en tu inventario.
+                    Tu pago en USDC queda resguardado en Escrow durante los 7 días de retención de
+                    Steam y solo se libera cuando el <code className="text-sky-300">asset_id</code>{' '}
+                    se confirma en tu inventario.
                   </p>
                 </div>
               ) : (
                 <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-3.5">
                   <div className="flex items-center gap-2 text-xs font-bold text-emerald-300">
                     <Zap className="h-4 w-4" />
-                    ENTREGA P2P INMEDIATA (SIN BOTS · TRADE URL)
+                    ENTREGA P2P INMEDIATA (TRADE URL)
                   </div>
                   <p className="mt-1 text-[11px] text-slate-300">
-                    Vendedor con Steam Guard Móvil activo (&gt;7 días). Recibes el Trade Offer
-                    directo en minutos tras confirmar el pago en Solana (~400ms).
+                    Intercambio directo sin bots intermedios tras verificar tu transacción en
+                    Solana.
                   </p>
                 </div>
               )}
 
-              {/* Transparent 3-Way Solana Split (Cap. Pagos & Referidos 50%) */}
               <div className="rounded-xl border border-slate-800 bg-[#10151f] p-3.5 text-xs">
                 <p className="mb-2 font-mono text-[10px] font-bold uppercase tracking-wider text-slate-400">
-                  Desglose Solana Escrow (Comisión 3.0% · Zero Chargebacks)
+                  Desglose Solana Escrow (Comisión 3.0%)
                 </p>
                 <div className="space-y-1.5 font-mono text-[11px]">
                   <div className="flex justify-between text-slate-200">
@@ -209,7 +201,7 @@ export function SkinModal({
                   </div>
                   {hasReferrer && (
                     <div className="flex justify-between text-sky-300">
-                      <span>Referidor vitalicio 50% ({session.referredByCode})</span>
+                      <span>Referidor vitalicio 50% ({profile.referredByCode})</span>
                       <span>${split.referrerPayout.toFixed(2)} USDC</span>
                     </div>
                   )}
@@ -231,7 +223,7 @@ export function SkinModal({
                 className="flex w-full items-center justify-center gap-2 rounded-xl bg-emerald-500 px-4 py-3 text-sm font-bold text-slate-950 transition hover:bg-emerald-400"
               >
                 <ShieldCheck className="h-4 w-4" />
-                Comprar con Escrow Solana (${item.priceUsdc.toFixed(2)} USDC)
+                Crear Orden Escrow (${item.priceUsdc.toFixed(2)} USDC)
               </button>
               <button
                 type="button"
@@ -246,7 +238,7 @@ export function SkinModal({
               </button>
               <p className="flex items-center justify-center gap-1.5 text-[10px] text-slate-500">
                 <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />
-                Sin contracargos · Verificación on-chain en ~400ms
+                Sin contracargos · Verificación on-chain en Solana
               </p>
             </div>
           </div>

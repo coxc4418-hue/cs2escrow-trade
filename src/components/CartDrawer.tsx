@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import {
+  AlertTriangle,
   CheckCircle2,
   Clock,
   ShieldCheck,
@@ -12,18 +13,18 @@ import {
   computeSplit,
   type MarketItem,
   type PayCurrency,
-  type UserSession,
+  type UserProfile,
 } from '../data/market';
 
 interface CartDrawerProps {
   open: boolean;
   onClose: () => void;
   cart: MarketItem[];
-  session: UserSession;
+  profile: UserProfile;
   solPriceUsd: number;
   onRemove: (id: string) => void;
   onClear: () => void;
-  onConnectWallet: () => void;
+  onOpenProfile: () => void;
   onCheckout: (currency: PayCurrency) => void;
 }
 
@@ -31,11 +32,11 @@ export function CartDrawer({
   open,
   onClose,
   cart,
-  session,
+  profile,
   solPriceUsd,
   onRemove,
   onClear,
-  onConnectWallet,
+  onOpenProfile,
   onCheckout,
 }: CartDrawerProps) {
   const [currency, setCurrency] = useState<PayCurrency>('USDC');
@@ -43,9 +44,10 @@ export function CartDrawer({
   if (!open) return null;
 
   const grossTotal = Number(cart.reduce((acc, it) => acc + it.priceUsdc, 0).toFixed(2));
-  const split = computeSplit(grossTotal, Boolean(session.referredByCode));
+  const split = computeSplit(grossTotal, Boolean(profile.referredByCode));
   const totalSol = grossTotal / Math.max(solPriceUsd, 1);
   const hasEscrowItems = cart.some((it) => it.tradeHoldDays > 0);
+  const missingSetup = !profile.walletAddress || !profile.tradeUrl;
 
   return (
     <div className="fixed inset-0 z-50 flex justify-end bg-black/70 backdrop-blur-sm" onClick={onClose}>
@@ -70,14 +72,13 @@ export function CartDrawer({
           </button>
         </div>
 
-        {/* Cart items */}
         <div className="flex-1 space-y-2.5 overflow-y-auto p-4">
           {cart.length === 0 ? (
             <div className="flex h-64 flex-col items-center justify-center text-center text-slate-400">
               <ShoppingCart className="mb-3 h-10 w-10 text-slate-600" />
               <p className="text-sm font-semibold text-slate-200">Tu carrito está vacío</p>
               <p className="mt-1 text-xs text-slate-500">
-                Haz clic en &ldquo;Comprar&rdquo; en cualquier skin del catálogo real.
+                Selecciona cualquier skin del mercado para iniciar una orden de Escrow.
               </p>
             </div>
           ) : (
@@ -117,10 +118,8 @@ export function CartDrawer({
           )}
         </div>
 
-        {/* Footer checkout */}
         {cart.length > 0 && (
           <div className="space-y-3 border-t border-slate-800 bg-[#10151f] p-4">
-            {/* Currency Switcher: USDC vs SOL */}
             <div className="grid grid-cols-2 gap-2">
               <button
                 type="button"
@@ -131,7 +130,7 @@ export function CartDrawer({
                     : 'border-slate-700 bg-[#181e29] text-slate-400 hover:text-white'
                 }`}
               >
-                USDC (Estable · Recomendado)
+                USDC (Estable)
               </button>
               <button
                 type="button"
@@ -146,14 +145,33 @@ export function CartDrawer({
               </button>
             </div>
 
-            {hasEscrowItems && (
-              <div className="rounded-lg border border-indigo-500/35 bg-indigo-500/10 p-2.5 text-[11px] text-indigo-200">
-                Incluye skins con <strong>retención de seguridad de 7 días</strong>. Tu pago queda
-                protegido en el Escrow Solana hasta confirmar entrega en tu inventario.
+            {missingSetup && (
+              <div className="flex items-start gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 p-2.5 text-[11px] text-amber-200">
+                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-400" />
+                <div className="flex-1">
+                  Antes de crear una orden real, configura tu{' '}
+                  <strong>Wallet Solana</strong> y tu <strong>Trade URL P2P</strong> en tu perfil.
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onClose();
+                      onOpenProfile();
+                    }}
+                    className="ml-1.5 font-bold underline hover:text-white"
+                  >
+                    Configurar ahora
+                  </button>
+                </div>
               </div>
             )}
 
-            {/* Split summary */}
+            {hasEscrowItems && (
+              <div className="rounded-lg border border-indigo-500/35 bg-indigo-500/10 p-2.5 text-[11px] text-indigo-200">
+                Incluye ítems con <strong>Escrow Steam de 7 días</strong>. El pago permanece
+                protegido hasta verificar entrega en tu inventario.
+              </div>
+            )}
+
             <div className="space-y-1 rounded-lg border border-slate-800 bg-[#161c27] p-3 font-mono text-[11px]">
               <div className="flex justify-between text-slate-300">
                 <span>Vendedor recibe (97.0%)</span>
@@ -163,9 +181,9 @@ export function CartDrawer({
                 <span>Comisión total (3.0%)</span>
                 <span>${split.feeTotal.toFixed(2)}</span>
               </div>
-              {session.referredByCode && (
+              {profile.referredByCode && (
                 <div className="flex justify-between text-sky-300">
-                  <span>↳ 50% Referidor ({session.referredByCode})</span>
+                  <span>↳ 50% Referidor ({profile.referredByCode})</span>
                   <span>${split.referrerPayout.toFixed(2)}</span>
                 </div>
               )}
@@ -179,21 +197,26 @@ export function CartDrawer({
               </div>
             </div>
 
-            {/* Connected Wallet */}
             <div className="flex items-center justify-between rounded-lg border border-slate-800 bg-[#161c27] px-3 py-2 text-[11px]">
               <span className="flex items-center gap-1.5 text-slate-300">
                 <Wallet className="h-3.5 w-3.5 text-emerald-400" />
-                {session.walletProvider}:{' '}
-                <code className="text-slate-400">
-                  {session.walletAddress.slice(0, 6)}…{session.walletAddress.slice(-4)}
-                </code>
+                {profile.walletAddress ? (
+                  <code className="text-slate-300">
+                    {profile.walletAddress.slice(0, 6)}…{profile.walletAddress.slice(-4)}
+                  </code>
+                ) : (
+                  <span className="text-amber-300">Sin wallet vinculada</span>
+                )}
               </span>
               <button
                 type="button"
-                onClick={onConnectWallet}
+                onClick={() => {
+                  onClose();
+                  onOpenProfile();
+                }}
                 className="font-semibold text-sky-400 hover:text-sky-300"
               >
-                Cambiar / Phantom
+                Configurar
               </button>
             </div>
 
@@ -211,13 +234,13 @@ export function CartDrawer({
                 className="flex flex-1 items-center justify-center gap-2 rounded-xl bg-emerald-500 px-4 py-2.5 text-xs font-bold text-slate-950 transition hover:bg-emerald-400"
               >
                 <ShieldCheck className="h-4 w-4" />
-                Pagar y Bloquear en Escrow Solana
+                Crear Orden de Escrow
               </button>
             </div>
 
             <p className="flex items-center justify-center gap-1 text-[10px] text-slate-500">
               <CheckCircle2 className="h-3 w-3 text-emerald-500" />
-              Trade URL P2P verificada · Gas &lt; $0.001 USD
+              Saldo actual de cuenta: ${profile.balanceUsdc.toFixed(2)} USDC
             </p>
           </div>
         )}
